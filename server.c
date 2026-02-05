@@ -1,154 +1,150 @@
+#include <sys/mman.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <pthread.h>
-#include <sys/mman.h>
 #include <string.h>
-#include <time.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <signal.h>
+#include "utils.h"
+#include "tcpmessage.h"
+#include "game.h"
 
-#define PORT 8080
-#define MAX_PLAYERS 5
-#define TARGET_POS 30
-#define BUF_SIZE 256
+volatile int app_running = 1;
+pthread_mutex_t app_lock;
+sem_t connection_sem;
 
-typedef struct {
-    int position[MAX_PLAYERS];
-    int current_turn;
-    int total_players;
-    int winner;
-    pthread_mutex_t lock;
-} GameState;
-
+int lfd; // listen file descriptor
+struct sockaddr_in client, server;
 GameState *game;
 
-
-void send_msg(int fd, const char *msg) {
-    write(fd, msg, strlen(msg));
+void appExit()
+{
+    pthread_mutex_lock(&app_lock);
+    app_running = 0;
+    pthread_mutex_unlock(&app_lock);
 }
 
-void *handle_turn(void *arg) {
-    int *data = (int *)arg;
-    int player_id = data[0];
-    int client_fd = data[1];
+void initSocket(struct sockaddr_in server)
+{
+    lfd = socket(AF_INET, SOCK_STREAM, 0);
 
-    char buffer[BUF_SIZE];
-
-    send_msg(client_fd, "Your turn! Type ROLL\n");
-
-    int n = read(client_fd, buffer, sizeof(buffer)-1);
-    if (n <= 0) return NULL;
-    buffer[n] = '\0';
-
-    pthread_mutex_lock(&game->lock);
-
-    if (game->winner != -1) {
-        pthread_mutex_unlock(&game->lock);
-        return NULL;
-    }
-
-    if (strcmp(buffer, "ROLL\n") != 0) {
-        send_msg(client_fd, "Invalid command. Type ROLL\n");
-        pthread_mutex_unlock(&game->lock);
-        return NULL;
-    }
-
-    if (game->current_turn != player_id) {
-        send_msg(client_fd, "Not your turn.\n");
-        pthread_mutex_unlock(&game->lock);
-        return NULL;
-    }
-
-    int dice = rand() % 6 + 1;
-    game->position[player_id] += dice;
-
-    sprintf(buffer,
-            "You rolled %d. New position: %d\n",
-            dice, game->position[player_id]);
-    send_msg(client_fd, buffer);
-
-    printf("Player %d rolled %d → position %d\n",
-           player_id, dice, game->position[player_id]);
-
-    if (game->position[player_id] >= TARGET_POS) {
-        game->winner = player_id;
-        sprintf(buffer, "Player %d WINS!\n", player_id);
-        printf("%s", buffer);
-    } else {
-        game->current_turn =
-            (player_id + 1) % game->total_players;
-    }
-
-    pthread_mutex_unlock(&game->lock);
-    return NULL;
+    bind(lfd, (struct sockaddr *)&server, sizeof server);
+    listen(lfd, MAX_PLAYERS);
 }
 
-int main() {
-    // Shared memory
-    game = mmap(NULL, sizeof(GameState),
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+void handleDisconnect(int player_id)
+{
+    int confd = game->connected[player_id]->confd;
+    if (confd == -1)
+        return;
+    sendMessage(confd, "", MSG_END);
+    disconnectPlayer(game, player_id);
+    close(confd);
+    sem_post(&connection_sem);
+}
+
+void handleInterrupt(int sig)
+{
+    appExit();
+
+    for (int i = 0; i < game->total_players; i++)
+        if (game->connected[i]->confd != -1)
+        {
+            handleDisconnect(i);
+        }
+
+    printf("%d connections closed.\n", game->total_players);
+    freeGame(game);
+    close(lfd);
+    sem_destroy(&connection_sem);
+    pthread_mutex_destroy(&app_lock);
+    printf("Socket closed.\n");
+    exit(0);
+}
+
+void *messageHandler(char *message, char *msg_code)
+{
+    printf("Handling message\n");
+    if (strncmp(msg_code, MSG_END, 2) == 0)
+    {
+        int playerId = atoi(message);
+        handleDisconnect(playerId);
+        printf("Player %d disconnected.\n", playerId);
+        if (game->total_players == 0)
+            app_running = 0;
+    }
+}
+
+void connectionHandlerThread()
+{
+    while (app_running)
+    {
+        sem_wait(&connection_sem);
+        printf("Creating new connection handler thread.\n");
+        printf("Waiting for players to connect: %d players waiting.\n", game->total_players);
+        int n, confd;
+        n = sizeof client;
+        confd = accept(lfd, (struct sockaddr *)&client, &n);
+
+        if (confd == -1)
+        {
+            perror("accept failed");
+            return;
+        }
+
+        int player_id = connectPlayer(game, confd);
+        // Handle each player in a seperate thread.
+        game->connected[player_id]->recv_tid = createReceiveThread(confd, (void *)messageHandler, (int *)&app_running);
+        printf("Receive thread created for player %d.\n", player_id);
+
+        char message[1];
+        sprintf(message, "%d", player_id);
+        printf("Player connected with id %s.\n", message);
+        sendMessage(confd, message, MSG_CONN);
+    }
+}
+
+int main()
+{
+    signal(SIGINT, handleInterrupt);
 
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(&game->lock, &attr);
+    pthread_mutex_init(&app_lock, &attr);
 
-    game->current_turn = 0;
-    game->winner = -1;
-    game->total_players = 0;
+    sem_init(&connection_sem, 0, MAX_PLAYERS);
 
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    server.sin_family = AF_INET;
+    server.sin_port = 8080;
+    server.sin_addr.s_addr = INADDR_ANY;
 
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(PORT),
-        .sin_addr.s_addr = INADDR_ANY
-    };
+    initSocket(server);
+    game = initGame();
 
-    bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
-    listen(server_fd, MAX_PLAYERS);
+    pthread_t conection_tid;
+    if (pthread_create(&conection_tid, NULL, (void *)connectionHandlerThread, NULL) != 0)
+    {
+        perror("pthread_create failed");
+        handleInterrupt(1);
+    }
+    pthread_detach(conection_tid);
 
-    printf("Dice Racing Server started...\n");
-
-    int connected_players = 0;
-
-    while (connected_players < MAX_PLAYERS) {
-        int client_fd = accept(server_fd, NULL, NULL);
-        int my_id = connected_players;
-
-        pthread_mutex_lock(&game->lock);
-        game->total_players++;
-        pthread_mutex_unlock(&game->lock);
-
-        connected_players++;
-
-        if (fork() == 0) {
-            close(server_fd);
-
-            srand(time(NULL) ^ getpid());
-
-            char msg[64];
-            sprintf(msg, "You are Player %d\n", my_id);
-            send_msg(client_fd, msg);
-
-            while (game->winner == -1) {
-                if (game->current_turn == my_id) {
-                    pthread_t tid;
-                    int data[2] = {my_id, client_fd};
-                    pthread_create(&tid, NULL, handle_turn, data);
-                    pthread_join(tid, NULL);
-                }
-                sleep(1);
-            }
-
-            close(client_fd);
-            exit(0);
-        }
-
-        close(client_fd);
+    
+    while (app_running)
+    {
+        printf("Running\n");
+        sleep(1);
     }
 
-    close(server_fd);
-    return 0;
+    printf("No active players, ending game...\n");
+
+    handleInterrupt(1);
 }
