@@ -15,6 +15,7 @@ int lfd;
 volatile int app_running = 1;
 pthread_mutex_t app_lock;
 volatile int client_id = -1;
+int requested_id = -1;
 
 void appExit()
 {
@@ -26,7 +27,7 @@ void appExit()
 void waitForPlayerId(char *message, char *msg_code)
 {
     if (strncmp(msg_code, MSG_CONN, 2) == 0)
-        return;
+        sendMessage(lfd, "", MSG_CONN);
 }
 
 void handleInterrupt(int sig)
@@ -56,9 +57,8 @@ void handleReceiveEnd()
 
 void handlePing() {}
 
-void *messageHandler(char *message, char *msg_code)
+void messageHandler(char *message, char *msg_code)
 {
-    printf("%d\n", app_running);
     if (strncmp(msg_code, MSG_CONN, 2) == 0)
         handleConnectionAccepted(message);
 
@@ -89,8 +89,32 @@ void gameSend(char *message)
     };
 }
 
-int main()
+void handleArgs(int argc, char *argv[])
 {
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
+        {
+            printf("Usage: %s [-h|--help] [-i|--id id]\n", argv[0]);
+            exit(0); // Exit after showing help
+        }
+        else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--id") == 0)
+        {
+            requested_id = atoi(argv[i + 1]);
+            i++; // Skip next argv position.
+        }
+        else
+        {
+            // Treat as a positional argument (e.g., a filename)
+            printf("Processing file: %s\n", argv[i]);
+        }
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    handleArgs(argc, argv);
+
     signal(SIGINT, handleInterrupt);
 
     pthread_mutexattr_t attr;
@@ -107,8 +131,11 @@ int main()
     server.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     connect(lfd, (struct sockaddr *)&server, sizeof server);
-    createReceiveThread(lfd, (void *)messageHandler, (int *)&app_running);
+    createReceiveThread(lfd, messageHandler, (int *)&app_running);
     printf("Receive thread created.\n");
+    sendMessage(lfd,
+                requested_id == -1 ? "" : "" + requested_id,
+                MSG_CONN);
 
     // Wait to receive id from client.
     while (client_id == -1)

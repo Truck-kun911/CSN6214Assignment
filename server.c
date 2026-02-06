@@ -12,9 +12,11 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <signal.h>
-#include "utils.h"
+#include "gameutils.h"
 #include "tcpmessage.h"
 #include "game.h"
+
+#define PLAYER_ID_WAIT_MS 500
 
 volatile int app_running = 1;
 pthread_mutex_t app_lock;
@@ -39,21 +41,34 @@ void initSocket(struct sockaddr_in server)
     listen(lfd, MAX_PLAYERS);
 }
 
+void serverSendMessage(Player *player, char *message, char *msg_code)
+{
+    if (player->confd == -1)
+    {
+        printf("Unable to send message to disconnected player %d.\n", player->id);
+        return;
+    }
+    sendMessage(player->confd, message, msg_code);
+}
+
 void handleDisconnect(int player_id)
 {
+    Player *player = game->connected[player_id];
     int confd = game->connected[player_id]->confd;
     if (confd == -1)
         return;
-    sendMessage(confd, "", MSG_END);
+    serverSendMessage(player, "", MSG_END);
     disconnectPlayer(game, player_id);
     close(confd);
     sem_post(&connection_sem);
+
+    printf("Player %d disconnected.\n", player_id);
+    if (game->total_players == 0)
+        appExit();
 }
 
 void handleInterrupt(int sig)
 {
-    appExit();
-
     for (int i = 0; i < game->total_players; i++)
         if (game->connected[i]->confd != -1)
         {
@@ -61,6 +76,7 @@ void handleInterrupt(int sig)
         }
 
     printf("%d connections closed.\n", game->total_players);
+    appExit();
     freeGame(game);
     close(lfd);
     sem_destroy(&connection_sem);
@@ -69,20 +85,16 @@ void handleInterrupt(int sig)
     exit(0);
 }
 
-void *messageHandler(char *message, char *msg_code)
+void messageHandler(char *message, char *msg_code)
 {
-    printf("Handling message\n");
     if (strncmp(msg_code, MSG_END, 2) == 0)
     {
-        int playerId = atoi(message);
-        handleDisconnect(playerId);
-        printf("Player %d disconnected.\n", playerId);
-        if (game->total_players == 0)
-            app_running = 0;
+        int player_id = atoi(message);
+        handleDisconnect(player_id);
     }
 }
 
-void connectionHandlerThread()
+void *connectionHandlerThread(void *arg)
 {
     while (app_running)
     {
@@ -96,22 +108,65 @@ void connectionHandlerThread()
         if (confd == -1)
         {
             perror("accept failed");
-            return;
+            pthread_exit((void *)0);
         }
 
-        int player_id = connectPlayer(game, confd);
+        // See if incoming connection is requesting a specific id.
+        int64_t start_time = currentTimeMillis();
+        int player_id = -1;
+        char id_buff[100] = "", code_buff[3] = "";
+
+        receiveMessage(confd, id_buff, code_buff);
+        if (strncmp(code_buff, MSG_CONN, 2) == 0 && id_buff[0] != '\0')
+            player_id = atoi(id_buff);
+
+        if (player_id == -1)
+            player_id = connectNewPlayer(game, confd);
+        else
+        {
+            int connect_success = connectPlayer(game, confd, player_id);
+            if (!connect_success)
+            {
+                char s_buff[100] = "";
+                sprintf(s_buff, "Player id %d is already in use.", player_id);
+                sendMessage(confd, s_buff, MSG_TEXT);
+                sendMessage(confd, "", MSG_END);
+                pthread_exit((void *)0);
+            }
+        }
+
         // Handle each player in a seperate thread.
-        game->connected[player_id]->recv_tid = createReceiveThread(confd, (void *)messageHandler, (int *)&app_running);
+        game->connected[player_id]->recv_tid = createReceiveThread(confd, messageHandler, (int *)&app_running);
         printf("Receive thread created for player %d.\n", player_id);
 
         char message[1];
         sprintf(message, "%d", player_id);
         printf("Player connected with id %s.\n", message);
         sendMessage(confd, message, MSG_CONN);
+        printf("CONN sent.\n");
     }
 }
 
-int main()
+void handleEndOfGame(GameState *game)
+{
+    if (game->in_progress == 1)
+    {
+        printf("Ending early.\n");
+    }
+    else
+    {
+        printf("Game won by %d.", game->winner);
+    }
+
+    for (int i = 0; i < game->total_players; i++)
+    {
+        serverSendMessage(game->connected[i], "", MSG_TEXT);
+        serverSendMessage(game->connected[i], "", MSG_END);
+        disconnectPlayer(game, i);
+    }
+}
+
+int main(int argc, char *argv[])
 {
     signal(SIGINT, handleInterrupt);
 
@@ -130,21 +185,27 @@ int main()
     game = initGame();
 
     pthread_t conection_tid;
-    if (pthread_create(&conection_tid, NULL, (void *)connectionHandlerThread, NULL) != 0)
+    if (pthread_create(&conection_tid, NULL, connectionHandlerThread, NULL) != 0)
     {
         perror("pthread_create failed");
         handleInterrupt(1);
     }
     pthread_detach(conection_tid);
 
-    
     while (app_running)
     {
-        printf("Running\n");
-        sleep(1);
+        if (!game->in_progress)
+        {
+            printf("Waiting for start...\n");
+            sleep(1);
+        }
+        else
+        {
+            gameNextFrame(game);
+        }
     }
 
-    printf("No active players, ending game...\n");
+    handleEndOfGame(game);
 
     handleInterrupt(1);
 }

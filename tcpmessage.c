@@ -1,22 +1,28 @@
 #include "tcpmessage.h"
 
+typedef void (*handler_fn)(char *, char *);
+
 typedef struct
 {
     int fd;
     int *isRunning;
-    void (*handler)(char *, char *);
+    handler_fn handler;
 } ThreadLoopArgs;
 
-void receiveThread(void *arguments)
+void *receiveThread(void *arguments)
 {
     ThreadLoopArgs *args = (ThreadLoopArgs *)arguments;
+    handler_fn handler = &(*args->handler);
     while (*(args->isRunning))
     {
-        receiveMessage(args->fd, (void *)args->handler);
+        char msg_code[3] = "";
+        char message[98] = "";
+        receiveMessage(args->fd, message, msg_code);
+        handler(message, msg_code);
     }
 }
 
-pthread_t createReceiveThread(int fd, void (*handler)(char *, char *), int *running_flag)
+pthread_t createReceiveThread(int fd, handler_fn handler, int *running_flag)
 {
     pthread_t tid;
 
@@ -27,7 +33,7 @@ pthread_t createReceiveThread(int fd, void (*handler)(char *, char *), int *runn
     (*args).handler = handler;
     (*args).isRunning = running_flag;
 
-    if (pthread_create(&tid, NULL, (void *)receiveThread, args) != 0)
+    if (pthread_create(&tid, NULL, receiveThread, args) != 0)
     {
         perror("pthread_create failed");
         close(fd);
@@ -48,14 +54,10 @@ void sendMessage(int fd, char *message, char *msg_code)
     printf("\n");
 }
 
-void receiveMessage(int fd, void (*handler)(char *, char *))
+void receiveMessage(int fd, char *msg_buff, char *msg_code_buff)
 {
     char r_buff[100] = "";
-    ssize_t recv_success = recv(fd, r_buff, sizeof r_buff, 0);
-    if (recv_success == -1)
+    if (recv(fd, r_buff, sizeof r_buff, 0) == -1)
         return;
-    char msg_code[2];
-    char message[97];
-    sscanf(r_buff, "%[^;];%[^;];", &msg_code, &message);
-    handler(message, msg_code);
+    sscanf(r_buff, "%[^;];%[^;];", msg_code_buff, msg_buff);
 }
