@@ -55,34 +55,102 @@ void handleDisconnect(int player_id)
 {
     Player *player = game->connected[player_id];
     int confd = game->connected[player_id]->confd;
-    if (confd == -1)
-        return;
-    serverSendMessage(player, "", MSG_END);
-    disconnectPlayer(game, player_id);
-    close(confd);
+
+    if (confd != -1)
+    {
+        serverSendMessage(player, "", MSG_END);
+        disconnectPlayer(game, player_id);
+        close(confd);
+        printf("Player %d disconnected.\n", player_id);
+    }
+
     sem_post(&connection_sem);
 
-    printf("Player %d disconnected.\n", player_id);
     if (game->total_players == 0)
         appExit();
 }
 
-void handleInterrupt(int sig)
+void handleCommand(char *message)
 {
-    for (int i = 0; i < game->total_players; i++)
-        if (game->connected[i]->confd != -1)
+    int player_id, command;
+    char args[200];
+
+    sscanf(message, "%d:%d:%s", &player_id, &command, args);
+
+    Player *sender_player = game->connected[player_id];
+    gamehandler_fn handler = getCommandHandler(command);
+
+    if (handler == NULL)
+    {
+        serverSendMessage(sender_player, "Invalid command.", MSG_TEXT);
+        return;
+    }
+
+    if (command == CMD_START)
+    {
+        int vote_result = handler(game, player_id, NULL);
+        if (vote_result == -1)
         {
-            handleDisconnect(i);
+            serverSendMessage(sender_player, "You have already voted to start.", MSG_TEXT);
+            return;
+        }
+        char s_buff[200] = "";
+        sprintf(s_buff, "Player %d has voted to start.", player_id);
+        for (int i = 0; i < game->total_players; i++)
+        {
+            serverSendMessage(game->connected[i], s_buff, MSG_TEXT);
+        }
+        printf("%s\n", s_buff);
+        return;
+    }
+
+    if (command == CMD_ROLL)
+    {
+        int roll_result = handler(game, player_id, NULL);
+        char s_buff[200] = "";
+        if (roll_result == -1)
+        {
+            int current_player_id = current(game->scheduler);
+            sprintf(s_buff, "Cannot roll on player %d's turn.", current_player_id);
+            serverSendMessage(sender_player, s_buff, MSG_TEXT);
+            return;
         }
 
-    printf("%d connections closed.\n", game->total_players);
-    appExit();
-    freeGame(game);
-    close(lfd);
-    sem_destroy(&connection_sem);
-    pthread_mutex_destroy(&app_lock);
-    printf("Socket closed.\n");
-    exit(0);
+        char progress_bars_buff[100] = "";
+        for (int i = 0; i < game->total_players; i++)
+        {
+            Player *player = game->connected[i];
+            char progress_buff[100] = "";
+            getProgressBar(game, player, progress_buff);
+            sprintf(progress_bars_buff, "%s\n%s", progress_bars_buff, progress_buff);
+        }
+
+        for (int i = 0; i < game->total_players; i++)
+        {
+            char s_buff[250] = "";
+            char player_name[10] = "";
+            if (i == player_id)
+                sprintf(player_name, "You");
+            else
+                sprintf(player_name, "Player %d", player_id);
+
+            sprintf(
+                s_buff,
+                "%s\n%s rolled a %d!",
+                progress_bars_buff,
+                player_name,
+                roll_result);
+
+            int next_player_id = current(game->scheduler);
+
+            if (i == next_player_id)
+                sprintf(s_buff, "%s\nYour turn to roll.", s_buff);
+
+            serverSendMessage(game->connected[i], s_buff, MSG_TEXT);
+        }
+
+        return;
+    }
 }
 
 void messageHandler(char *message, char *msg_code)
@@ -92,12 +160,21 @@ void messageHandler(char *message, char *msg_code)
         int player_id = atoi(message);
         handleDisconnect(player_id);
     }
+
+    if (strncmp(msg_code, MSG_CMD, 2) == 0)
+    {
+        handleCommand(message);
+    }
 }
 
 void *connectionHandlerThread(void *arg)
 {
     while (app_running)
     {
+        while (game->in_progress)
+        {
+        }
+
         sem_wait(&connection_sem);
         printf("Creating new connection handler thread.\n");
         printf("Waiting for players to connect: %d players waiting.\n", game->total_players);
@@ -114,7 +191,7 @@ void *connectionHandlerThread(void *arg)
         // See if incoming connection is requesting a specific id.
         int64_t start_time = currentTimeMillis();
         int player_id = -1;
-        char id_buff[100] = "", code_buff[3] = "";
+        char id_buff[200] = "", code_buff[3] = "";
 
         receiveMessage(confd, id_buff, code_buff);
         if (strncmp(code_buff, MSG_CONN, 2) == 0 && id_buff[0] != '\0')
@@ -127,7 +204,7 @@ void *connectionHandlerThread(void *arg)
             int connect_success = connectPlayer(game, confd, player_id);
             if (!connect_success)
             {
-                char s_buff[100] = "";
+                char s_buff[200] = "";
                 sprintf(s_buff, "Player id %d is already in use.", player_id);
                 sendMessage(confd, s_buff, MSG_TEXT);
                 sendMessage(confd, "", MSG_END);
@@ -166,6 +243,28 @@ void handleEndOfGame(GameState *game)
     }
 }
 
+void cleanup()
+{
+    for (int i = 0; i < game->total_players; i++)
+        if (game->connected[i]->confd != -1)
+        {
+            handleDisconnect(i);
+        }
+
+    printf("%d connections closed.\n", game->total_players);
+    appExit();
+    freeGame(game);
+    sem_destroy(&connection_sem);
+    pthread_mutex_destroy(&app_lock);
+    close(lfd);
+    printf("Socket closed.\n");
+}
+
+void handleInterrupt(int sig)
+{
+    cleanup();
+}
+
 int main(int argc, char *argv[])
 {
     signal(SIGINT, handleInterrupt);
@@ -201,11 +300,12 @@ int main(int argc, char *argv[])
         }
         else
         {
-            gameNextFrame(game);
+            printf("Game in progress...\n");
+            sleep(1);
         }
     }
 
     handleEndOfGame(game);
 
-    handleInterrupt(1);
+    cleanup();
 }

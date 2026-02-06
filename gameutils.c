@@ -25,3 +25,7 @@ int64_t currentTimeMillis() {
     int64_t ms = spec.tv_sec * 1000 + spec.tv_nsec / 1000000;
     return ms;
 }
+
+int roundedDivide(int a, int b) {
+    return (a + (b / 2)) / b;
+}

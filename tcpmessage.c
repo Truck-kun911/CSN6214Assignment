@@ -1,7 +1,5 @@
 #include "tcpmessage.h"
 
-typedef void (*handler_fn)(char *, char *);
-
 typedef struct
 {
     int fd;
@@ -16,7 +14,7 @@ void *receiveThread(void *arguments)
     while (*(args->isRunning))
     {
         char msg_code[3] = "";
-        char message[98] = "";
+        char message[200] = "";
         receiveMessage(args->fd, message, msg_code);
         handler(message, msg_code);
     }
@@ -48,15 +46,15 @@ void sendMessage(int fd, char *message, char *msg_code)
 {
     if (msg_code == NULL)
         msg_code = MSG_TEXT;
-    char s_buff[100] = "";
+    char s_buff[200] = "";
     sprintf(s_buff, "%s;%s;", msg_code, message);
-    int t = send(fd, s_buff, sizeof message, 0);
+    int t = send(fd, s_buff, strlen(s_buff), 0);
     printf("\n");
 }
 
 void receiveMessage(int fd, char *msg_buff, char *msg_code_buff)
 {
-    char r_buff[100] = "";
+    char r_buff[200] = "";
     if (recv(fd, r_buff, sizeof r_buff, 0) == -1)
         return;
     sscanf(r_buff, "%[^;];%[^;];", msg_code_buff, msg_buff);

@@ -9,5 +9,6 @@
 void toLowercase(char *str);
 int contains(int arr[], int size, int target_value);
 int64_t currentTimeMillis();
+int roundedDivide(int a, int b);
 
 #endif

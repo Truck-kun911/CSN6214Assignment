@@ -15,7 +15,9 @@
 #define MSG_TEXT "05"
 #define MSG_CMD "06"
 
-pthread_t createReceiveThread(int fd, void (*handler)(char*, char*), int *running_flag);
+typedef void (*handler_fn)(char *, char *);
+
+pthread_t createReceiveThread(int fd, handler_fn handler, int *running_flag);
 void sendMessage(int fd, char* message, char* message_type);
 void receiveMessage(int fd, char *msg_buff, char *msg_code_buff);
 

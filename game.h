@@ -12,10 +12,12 @@
 
 #define MAX_PLAYERS 5
 #define MIN_PLAYERS 3
+#define PROGRESS_BAR_SIZE 10
+#define TARGET_POS 21
 
 #define CMD_NONE 0
 #define CMD_ROLL 1
-
+#define CMD_START 2
 
 typedef struct
 {
@@ -23,8 +25,6 @@ typedef struct
     int confd;
     bool voted;
     pthread_t recv_tid;
-    int command_buffer;
-    bool command_changed;
 } Player;
 
 typedef struct
@@ -41,12 +41,17 @@ typedef struct
     RoundRobinScheduler *scheduler;
 } GameState;
 
+typedef int (*gamehandler_fn)(GameState *, int, char *);
+
 GameState *initGame();
+void resetGame(GameState *game);
 void freeGame(GameState *game);
+void lockGame(GameState *game);
+void unlockGame(GameState *game);
 int connectPlayer(GameState *game, int confd, int id);
 int connectNewPlayer(GameState *game, int confd);
 void disconnectPlayer(GameState *game, int id);
-int setPlayerCommand(GameState *game, int player_id, char* command);
-void gameNextFrame(GameState *game);
+void getProgressBar(GameState *game, Player *player, char *buff);
+gamehandler_fn getCommandHandler(int command);
 
 #endif

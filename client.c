@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include "tcpmessage.h"
+#include "game.h"
 
 int lfd;
 volatile int app_running = 1;
@@ -80,7 +81,19 @@ void messageHandler(char *message, char *msg_code)
 
 void gameSend(char *message)
 {
-    char s_buff[100] = "";
+    char s_buff[200] = "";
+    if (strncmp(message, "start", 5) == 0)
+    {
+        sprintf(s_buff, "%d:%d:", client_id, CMD_START);
+        sendMessage(lfd, s_buff, MSG_CMD);
+    };
+
+    if (strncmp(message, "roll", 4) == 0)
+    {
+        sprintf(s_buff, "%d:%d:", client_id, CMD_ROLL);
+        sendMessage(lfd, s_buff, MSG_CMD);
+    };
+
     if (strncmp(message, "end", 3) == 0)
     {
         sprintf(s_buff, "%d", client_id);
@@ -123,7 +136,7 @@ int main(int argc, char *argv[])
     pthread_mutex_init(&app_lock, &attr);
 
     struct sockaddr_in server;
-    char s_buff[100] = "";
+    char s_buff[200] = "";
 
     lfd = socket(AF_INET, SOCK_STREAM, 0);
     server.sin_family = AF_INET;
