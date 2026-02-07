@@ -11,8 +11,10 @@ void *receiveThread(void *arguments)
 {
     ThreadLoopArgs *args = (ThreadLoopArgs *)arguments;
     handler_fn handler = &(*args->handler);
-    while (*(args->isRunning))
+    while (1)
     {
+        if (!*(args->isRunning))
+            break;
         char msg_code[3] = "";
         char message[200] = "";
         receiveMessage(args->fd, message, msg_code);

@@ -18,13 +18,15 @@
 
 #define PLAYER_ID_WAIT_MS 500
 
+int is_parent_process = 1;
 volatile int app_running = 1;
 pthread_mutex_t app_lock;
-sem_t connection_sem;
 
 int lfd; // listen file descriptor
 struct sockaddr_in client, server;
 GameState *game;
+
+pid_t child_pids[MAX_PLAYERS];
 
 void appExit()
 {
@@ -63,11 +65,7 @@ void handleDisconnect(int player_id)
         close(confd);
         printf("Player %d disconnected.\n", player_id);
     }
-
-    sem_post(&connection_sem);
-
-    if (game->total_players == 0)
-        appExit();
+    appExit();
 }
 
 void handleEndOfGame(GameState *game)
@@ -99,7 +97,7 @@ void handleCommand(char *message)
 
     sscanf(message, "%d:%d:%s", &player_id, &command, args);
 
-    if (game->in_progress == 0)
+    if (game->in_progress == 0 && command != CMD_START)
     {
         serverSendMessage(game->connected[atoi(message)], "Game has not started yet.", MSG_TEXT);
         return;
@@ -201,61 +199,64 @@ void messageHandler(char *message, char *msg_code)
     }
 }
 
-void *connectionHandlerThread(void *arg)
+void connectionHandler()
 {
-    while (app_running)
+    lockGame(game);
+    int progress_flag = game->in_progress;
+    unlockGame(game);
+    while (progress_flag == 1)
     {
-        while (game->in_progress)
-        {
-        }
+        // Wait for the current game to end before accepting new connections.
+        sleep(1);
+    }
 
-        sem_wait(&connection_sem);
-        printf("Creating new connection handler thread.\n");
-        printf("Waiting for players to connect: %d players waiting.\n", game->total_players);
-        int n, confd;
-        n = sizeof client;
-        confd = accept(lfd, (struct sockaddr *)&client, &n);
+    printf("Creating new connection handler thread.\n");
+    printf("Waiting for players to connect: %d players waiting.\n", game->total_players);
+    int n, confd;
+    n = sizeof client;
+    confd = accept(lfd, (struct sockaddr *)&client, &n);
 
-        if (confd == -1)
+
+
+    if (confd == -1)
+    {
+        perror("accept failed");
+        pthread_exit((void *)0);
+    }
+
+    // See if incoming connection is requesting a specific id.
+    int64_t start_time = currentTimeMillis();
+    int player_id = -1;
+    char id_buff[200] = "", code_buff[3] = "";
+
+    receiveMessage(confd, id_buff, code_buff);
+    if (strncmp(code_buff, MSG_CONN, 2) == 0 && id_buff[0] != '\0')
+        player_id = atoi(id_buff);
+
+    if (player_id == -1)
+        player_id = connectNewPlayer(game, confd);
+    else
+    {
+        int connect_success = connectPlayer(game, confd, player_id);
+        if (!connect_success)
         {
-            perror("accept failed");
+            char s_buff[200] = "";
+            sprintf(s_buff, "Player id %d is already in use.", player_id);
+            sendMessage(confd, s_buff, MSG_TEXT);
+            sendMessage(confd, "", MSG_END);
             pthread_exit((void *)0);
         }
-
-        // See if incoming connection is requesting a specific id.
-        int64_t start_time = currentTimeMillis();
-        int player_id = -1;
-        char id_buff[200] = "", code_buff[3] = "";
-
-        receiveMessage(confd, id_buff, code_buff);
-        if (strncmp(code_buff, MSG_CONN, 2) == 0 && id_buff[0] != '\0')
-            player_id = atoi(id_buff);
-
-        if (player_id == -1)
-            player_id = connectNewPlayer(game, confd);
-        else
-        {
-            int connect_success = connectPlayer(game, confd, player_id);
-            if (!connect_success)
-            {
-                char s_buff[200] = "";
-                sprintf(s_buff, "Player id %d is already in use.", player_id);
-                sendMessage(confd, s_buff, MSG_TEXT);
-                sendMessage(confd, "", MSG_END);
-                pthread_exit((void *)0);
-            }
-        }
-
-        // Handle each player in a seperate thread.
-        game->connected[player_id]->recv_tid = createReceiveThread(confd, messageHandler, (int *)&app_running);
-        printf("Receive thread created for player %d.\n", player_id);
-
-        char message[1];
-        sprintf(message, "%d", player_id);
-        printf("Player connected with id %s.\n", message);
-        sendMessage(confd, message, MSG_CONN);
-        printf("CONN sent.\n");
     }
+
+    // Handle each player in a seperate thread.
+    game->connected[player_id]->recv_tid = createReceiveThread(confd, messageHandler, (int *)&app_running);
+    printf("Receive thread created for player %d.\n", player_id);
+
+    char message[1];
+    sprintf(message, "%d", player_id);
+    printf("Player connected with id %s.\n", message);
+    sendMessage(confd, message, MSG_CONN);
+    printf("CONN sent.\n");
 }
 
 void cleanup()
@@ -269,46 +270,37 @@ void cleanup()
     printf("%d connections closed.\n", game->total_players);
     appExit();
     freeGame(game);
-    sem_destroy(&connection_sem);
     pthread_mutex_destroy(&app_lock);
     close(lfd);
     printf("Socket closed.\n");
+    printf("Cleanup complete. Exiting.\n");
 }
 
 void handleInterrupt(int sig)
 {
-    cleanup();
+    pthread_mutex_lock(&app_lock);
+    app_running = 0;
+    pthread_mutex_unlock(&app_lock);
+    printf("Interrupt received, shutting down...\n");
 }
 
-int main(int argc, char *argv[])
+int childMain()
 {
-    signal(SIGINT, handleInterrupt);
-
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(&app_lock, &attr);
-
-    sem_init(&connection_sem, 0, MAX_PLAYERS);
-
-    server.sin_family = AF_INET;
-    server.sin_port = 8080;
-    server.sin_addr.s_addr = INADDR_ANY;
-
-    initSocket(server);
-    game = initGame();
-
-    pthread_t conection_tid;
-    if (pthread_create(&conection_tid, NULL, connectionHandlerThread, NULL) != 0)
-    {
-        perror("pthread_create failed");
-        handleInterrupt(1);
-    }
-    pthread_detach(conection_tid);
-
     while (app_running)
     {
-        if (!game->in_progress)
+        connectionHandler();
+    }
+    return 0;
+}
+
+int parentMain()
+{
+    while (app_running)
+    {
+        lockGame(game);
+        int progress_flag = game->in_progress;
+        unlockGame(game);
+        if (!progress_flag)
         {
             printf("Waiting for start...\n");
             sleep(1);
@@ -323,4 +315,42 @@ int main(int argc, char *argv[])
     handleEndOfGame(game);
 
     cleanup();
+}
+
+int main(int argc, char *argv[])
+{
+    signal(SIGINT, handleInterrupt);
+    signal(SIGCHLD, SIG_IGN); // Prevent zombie processes.
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(&app_lock, &attr);
+
+    server.sin_family = AF_INET;
+    server.sin_port = 8080;
+    server.sin_addr.s_addr = INADDR_ANY;
+
+    initSocket(server);
+    game = initGame();
+
+    
+
+    for (int i = 0; i < MAX_PLAYERS; i++)
+    {
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            is_parent_process = 0;
+            childMain();
+            exit(0);
+        }
+        else
+        {
+            child_pids[i] = pid;
+            parentMain();
+        }
+    }
+
+    return 0;
 }

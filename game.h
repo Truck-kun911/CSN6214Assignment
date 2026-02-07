@@ -32,7 +32,7 @@ typedef struct
 
 typedef struct
 {
-    pthread_mutex_t lock;
+    sem_t lock;
     int position[MAX_PLAYERS];
     int current_turn;
     int total_players;

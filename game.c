@@ -18,6 +18,8 @@ GameState *initGame()
         game->position[i] = 0;
     }
 
+    sem_init(&game->lock, 1, 1);
+
     return game;
 }
 
@@ -31,11 +33,6 @@ void resetGame(GameState *game)
     if (game->scheduler != NULL)
         free_scheduler(game->scheduler);
     game->scheduler = create_scheduler(MAX_PLAYERS);
-
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(&game->lock, &attr);
 }
 
 void freeGame(GameState *game)
@@ -52,12 +49,12 @@ void freeGame(GameState *game)
 
 void lockGame(GameState *game)
 {
-    pthread_mutex_lock(&game->lock);
+    sem_wait(&game->lock);
 }
 
 void unlockGame(GameState *game)
 {
-    pthread_mutex_unlock(&game->lock);
+    sem_post(&game->lock);
 }
 
 int connectPlayer(GameState *game, int confd, int id)
