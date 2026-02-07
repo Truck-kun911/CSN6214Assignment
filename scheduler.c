@@ -3,14 +3,19 @@
 // Function to create a new scheduler
 RoundRobinScheduler *create_scheduler(int capacity)
 {
-    RoundRobinScheduler *scheduler = (RoundRobinScheduler *)malloc(sizeof(RoundRobinScheduler));
+    RoundRobinScheduler *scheduler = mmap(NULL, sizeof(RoundRobinScheduler),
+                                          PROT_READ | PROT_WRITE,
+                                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (!scheduler)
     {
         printf("Memory allocation failed for scheduler\n");
         return NULL;
     }
 
-    scheduler->items = (int *)malloc(capacity * sizeof(int));
+    scheduler->items = (int *)mmap(NULL, sizeof(int),
+                                   PROT_READ | PROT_WRITE,
+                                   MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    ;
     if (!scheduler->items)
     {
         printf("Memory allocation failed for items\n");
@@ -117,7 +122,7 @@ void free_scheduler(RoundRobinScheduler *scheduler)
 
     if (scheduler->items)
     {
-        free(scheduler->items);
+        munmap(scheduler->items, sizeof(int));
     }
-    free(scheduler);
+    munmap(scheduler, sizeof(RoundRobinScheduler));
 }

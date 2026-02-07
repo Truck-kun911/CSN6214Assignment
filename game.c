@@ -5,10 +5,11 @@ GameState *initGame()
     GameState *game = mmap(NULL, sizeof(GameState),
                            PROT_READ | PROT_WRITE,
                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    resetGame(game);
     for (int i = 0; i < MAX_PLAYERS; i++)
     {
-        Player *player = malloc(sizeof(Player));
+        Player *player = mmap(NULL, sizeof(Player),
+                           PROT_READ | PROT_WRITE,
+                           MAP_SHARED | MAP_ANONYMOUS, -1, 0);;
         player->id = i;
         player->confd = -1;
         player->voted = 0;
@@ -16,31 +17,45 @@ GameState *initGame()
         player->wins = 0;
         game->connected[i] = player;
         game->position[i] = 0;
+        sem_init(&player->lock, 1, 1);
     }
 
     sem_init(&game->lock, 1, 1);
+    resetGame(game);
 
     return game;
 }
 
 void resetGame(GameState *game)
 {
+    lockGame(game);
     game->in_progress = 0;
     game->current_turn = 0;
     game->total_players = 0;
     game->start_vote = 0;
     game->winner = -1;
+
     if (game->scheduler != NULL)
         free_scheduler(game->scheduler);
     game->scheduler = create_scheduler(MAX_PLAYERS);
+
+    for (int i = 0; i < MAX_PLAYERS; i++)
+    {
+        game->position[i] = 0;
+        game->connected[i]->voted = 0;
+    }
+    unlockGame(game);
 }
 
 void freeGame(GameState *game)
 {
     for (int i = 0; i < MAX_PLAYERS; i++)
     {
-        free(game->connected[i]);
+        sem_destroy(&game->connected[i]->lock);
+        munmap(game->connected[i], sizeof(Player));
     }
+    sem_destroy(&game->lock);
+    free_scheduler(game->scheduler);
     if (munmap(game, sizeof(GameState)) == -1)
     {
         perror("munmap failed");
@@ -55,6 +70,16 @@ void lockGame(GameState *game)
 void unlockGame(GameState *game)
 {
     sem_post(&game->lock);
+}
+
+void lockPlayer(Player *player)
+{
+    sem_wait(&player->lock);
+}
+
+void unlockPlayer(Player *player)
+{
+    sem_post(&player->lock);
 }
 
 int connectPlayer(GameState *game, int confd, int id)
@@ -95,7 +120,6 @@ void disconnectPlayer(GameState *game, int id)
 {
     lockGame(game);
     game->connected[id]->confd = -1;
-    game->total_players--;
     unlockGame(game);
 }
 

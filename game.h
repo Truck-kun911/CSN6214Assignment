@@ -25,6 +25,7 @@ typedef struct
 {
     int id;
     int confd;
+    sem_t lock;
     bool voted;
     pthread_t recv_tid;
     int wins;
@@ -50,6 +51,8 @@ GameState *initGame();
 void resetGame(GameState *game);
 void freeGame(GameState *game);
 void lockGame(GameState *game);
+void lockPlayer(Player *player);
+void unlockPlayer(Player *player);
 void unlockGame(GameState *game);
 int connectPlayer(GameState *game, int confd, int id);
 int connectNewPlayer(GameState *game, int confd);

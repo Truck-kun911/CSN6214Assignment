@@ -16,9 +16,6 @@
 #include "tcpmessage.h"
 #include "game.h"
 
-#define PLAYER_ID_WAIT_MS 500
-
-int is_parent_process = 1;
 volatile int app_running = 1;
 pthread_mutex_t app_lock;
 
@@ -38,9 +35,12 @@ void appExit()
 void initSocket(struct sockaddr_in server)
 {
     lfd = socket(AF_INET, SOCK_STREAM, 0);
-
     bind(lfd, (struct sockaddr *)&server, sizeof server);
-    listen(lfd, MAX_PLAYERS);
+    if (listen(lfd, MAX_PLAYERS) == -1)
+    {
+        perror("listen failed");
+        exit(1);
+    }
 }
 
 void serverSendMessage(Player *player, char *message, char *msg_code)
@@ -50,11 +50,14 @@ void serverSendMessage(Player *player, char *message, char *msg_code)
         printf("Unable to send message to disconnected player %d.\n", player->id);
         return;
     }
+    lockPlayer(player);
     sendMessage(player->confd, message, msg_code);
+    unlockPlayer(player);
 }
 
 void handleDisconnect(int player_id)
 {
+    lockGame(game);
     Player *player = game->connected[player_id];
     int confd = game->connected[player_id]->confd;
 
@@ -65,6 +68,8 @@ void handleDisconnect(int player_id)
         close(confd);
         printf("Player %d disconnected.\n", player_id);
     }
+    unlockGame(game);
+
     appExit();
 }
 
@@ -97,6 +102,10 @@ void handleCommand(char *message)
 
     sscanf(message, "%d:%d:%s", &player_id, &command, args);
 
+    lockGame(game);
+    GameState local_game_copy = *game;
+    unlockGame(game);
+
     if (game->in_progress == 0 && command != CMD_START)
     {
         serverSendMessage(game->connected[atoi(message)], "Game has not started yet.", MSG_TEXT);
@@ -124,7 +133,11 @@ void handleCommand(char *message)
         sprintf(s_buff, "Player %d has voted to start.", player_id);
         for (int i = 0; i < game->total_players; i++)
         {
+            lockGame(game);
             serverSendMessage(game->connected[i], s_buff, MSG_TEXT);
+            if (game->in_progress == 1)
+                serverSendMessage(game->connected[i], "All players have voted. The game is starting!", MSG_TEXT);
+            unlockGame(game);
         }
         printf("%s\n", s_buff);
         return;
@@ -173,6 +186,7 @@ void handleCommand(char *message)
             if (i == next_player_id)
                 sprintf(s_buff, "%s\nYour turn to roll.", s_buff);
 
+            printf("Sending to player %d at %d: %s\n", i, game->connected[i]->confd, s_buff);
             serverSendMessage(game->connected[i], s_buff, MSG_TEXT);
         }
 
@@ -197,66 +211,6 @@ void messageHandler(char *message, char *msg_code)
     {
         handleCommand(message);
     }
-}
-
-void connectionHandler()
-{
-    lockGame(game);
-    int progress_flag = game->in_progress;
-    unlockGame(game);
-    while (progress_flag == 1)
-    {
-        // Wait for the current game to end before accepting new connections.
-        sleep(1);
-    }
-
-    printf("Creating new connection handler thread.\n");
-    printf("Waiting for players to connect: %d players waiting.\n", game->total_players);
-    int n, confd;
-    n = sizeof client;
-    confd = accept(lfd, (struct sockaddr *)&client, &n);
-
-
-
-    if (confd == -1)
-    {
-        perror("accept failed");
-        pthread_exit((void *)0);
-    }
-
-    // See if incoming connection is requesting a specific id.
-    int64_t start_time = currentTimeMillis();
-    int player_id = -1;
-    char id_buff[200] = "", code_buff[3] = "";
-
-    receiveMessage(confd, id_buff, code_buff);
-    if (strncmp(code_buff, MSG_CONN, 2) == 0 && id_buff[0] != '\0')
-        player_id = atoi(id_buff);
-
-    if (player_id == -1)
-        player_id = connectNewPlayer(game, confd);
-    else
-    {
-        int connect_success = connectPlayer(game, confd, player_id);
-        if (!connect_success)
-        {
-            char s_buff[200] = "";
-            sprintf(s_buff, "Player id %d is already in use.", player_id);
-            sendMessage(confd, s_buff, MSG_TEXT);
-            sendMessage(confd, "", MSG_END);
-            pthread_exit((void *)0);
-        }
-    }
-
-    // Handle each player in a seperate thread.
-    game->connected[player_id]->recv_tid = createReceiveThread(confd, messageHandler, (int *)&app_running);
-    printf("Receive thread created for player %d.\n", player_id);
-
-    char message[1];
-    sprintf(message, "%d", player_id);
-    printf("Player connected with id %s.\n", message);
-    sendMessage(confd, message, MSG_CONN);
-    printf("CONN sent.\n");
 }
 
 void cleanup()
@@ -288,33 +242,85 @@ int childMain()
 {
     while (app_running)
     {
-        connectionHandler();
     }
     return 0;
 }
 
-int parentMain()
+void *connectionHandler()
 {
     while (app_running)
     {
         lockGame(game);
         int progress_flag = game->in_progress;
         unlockGame(game);
-        if (!progress_flag)
+        while (progress_flag == 1)
         {
-            printf("Waiting for start...\n");
+            // Wait for the current game to end before accepting new connections.
             sleep(1);
+        }
+
+        printf("Creating new connection handler thread.\n");
+        printf("Waiting for players to connect: %d players waiting.\n", game->total_players);
+        int n, confd;
+        n = sizeof client;
+        confd = accept(lfd, (struct sockaddr *)&client, &n);
+
+        if (confd == -1)
+        {
+            perror("accept failed");
+            pthread_exit((void *)0);
+        }
+
+        // See if incoming connection is requesting a specific id.
+        int64_t start_time = currentTimeMillis();
+        int player_id = -1;
+        char id_buff[200] = "", code_buff[3] = "";
+
+        receiveMessage(confd, id_buff, code_buff);
+        if (strncmp(code_buff, MSG_CONN, 2) == 0 && id_buff[0] != '\0')
+            player_id = atoi(id_buff);
+
+        if (player_id == -1)
+            player_id = connectNewPlayer(game, confd);
+        else
+        {
+            int connect_success = connectPlayer(game, confd, player_id);
+            if (!connect_success)
+            {
+                char s_buff[200] = "";
+                sprintf(s_buff, "Player id %d is already in use.", player_id);
+                sendMessage(confd, s_buff, MSG_TEXT);
+                sendMessage(confd, "", MSG_END);
+                close(confd);
+                printf("Rejected connection for player id %d: already in use.\n", player_id);
+                pthread_exit((void *)0);
+            }
+        }
+
+        // Handle each player in a seperate process.
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            game->connected[player_id]->recv_tid = createReceiveThread(confd, messageHandler, (int *)&app_running);
+            printf("Receive thread created for player %d.\n", player_id);
+
+            char message[1];
+            sprintf(message, "%d", player_id);
+            printf("Player connected with id %s.\n", message);
+            serverSendMessage(game->connected[player_id], message, MSG_CONN);
+            printf("CONN sent.\n");
+            childMain();
+            exit(0);
+        }
+        else if (pid > 0)
+        {
+            child_pids[player_id] = pid;
         }
         else
         {
-            printf("Game in progress...\n");
-            sleep(1);
+            perror("fork failed");
         }
     }
-
-    handleEndOfGame(game);
-
-    cleanup();
 }
 
 int main(int argc, char *argv[])
@@ -334,23 +340,42 @@ int main(int argc, char *argv[])
     initSocket(server);
     game = initGame();
 
-    
+    pthread_t tid;
+    pthread_create(&tid, NULL, (void *)connectionHandler, NULL);
+    pthread_detach(tid);
 
-    for (int i = 0; i < MAX_PLAYERS; i++)
+    while (app_running)
     {
-        pid_t pid = fork();
-        if (pid == 0)
+        lockGame(game);
+        bool all_disconnected = true;
+        for (int i = 0; i < game->total_players; i++)
         {
-            is_parent_process = 0;
-            childMain();
-            exit(0);
+            if (game->connected[i]->confd != -1)
+            {
+                all_disconnected = false;
+                break;
+            }
+        }
+        if (game->total_players > 0 && all_disconnected)
+            break;
+
+        int progress_flag = game->in_progress;
+        unlockGame(game);
+
+        if (!progress_flag)
+        {
+            printf("Waiting for start...\n");
+            sleep(1);
         }
         else
         {
-            child_pids[i] = pid;
-            parentMain();
+            sleep(1);
         }
     }
+
+    handleEndOfGame(game);
+
+    cleanup();
 
     return 0;
 }
