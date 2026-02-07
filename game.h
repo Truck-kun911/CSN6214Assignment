@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <sys/mman.h>
+#include <string.h>
 #include "scheduler.h"
 #include "gameutils.h"
 
