@@ -133,8 +133,6 @@ int handleRoll(GameState *game, int player_id, char *args)
     if (game->position[player_id] >= 21) {
         game->in_progress = 0;
         game->winner = player_id;
-        unlockGame(game);
-        return;
     }
 
     next(game->scheduler);
