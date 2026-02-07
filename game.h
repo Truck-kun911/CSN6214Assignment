@@ -15,6 +15,7 @@
 #define MIN_PLAYERS 3
 #define PROGRESS_BAR_SIZE 10
 #define TARGET_POS 21
+#define MAX_DICE_ROLL 6
 
 #define CMD_NONE 0
 #define CMD_ROLL 1
@@ -26,6 +27,7 @@ typedef struct
     int confd;
     bool voted;
     pthread_t recv_tid;
+    int wins;
 } Player;
 
 typedef struct

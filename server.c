@@ -70,12 +70,40 @@ void handleDisconnect(int player_id)
         appExit();
 }
 
+void handleEndOfGame(GameState *game)
+{
+    if (game->in_progress == 1)
+    {
+        printf("Ending early.\n");
+        // TODO: Handle persistence. Handle early ending.
+    }
+    else if (game->winner != -1)
+    {
+        for (int i = 0; i < game->total_players; i++)
+        {
+            char win_buff[250] = "";
+            if (i == game->winner)
+                sprintf(win_buff, "You have won the game! Congratulations!");
+            else
+                sprintf(win_buff, "Player %d has won the game! Better luck next time.", game->winner);
+            serverSendMessage(game->connected[i], win_buff, MSG_TEXT);
+        }
+        resetGame(game);
+    }
+}
+
 void handleCommand(char *message)
 {
     int player_id, command;
     char args[200];
 
     sscanf(message, "%d:%d:%s", &player_id, &command, args);
+
+    if (game->in_progress == 0)
+    {
+        serverSendMessage(game->connected[atoi(message)], "Game has not started yet.", MSG_TEXT);
+        return;
+    }
 
     Player *sender_player = game->connected[player_id];
     gamehandler_fn handler = getCommandHandler(command);
@@ -108,6 +136,7 @@ void handleCommand(char *message)
     {
         int roll_result = handler(game, player_id, NULL);
         char s_buff[200] = "";
+
         if (roll_result == -1)
         {
             int current_player_id = current(game->scheduler);
@@ -147,6 +176,11 @@ void handleCommand(char *message)
                 sprintf(s_buff, "%s\nYour turn to roll.", s_buff);
 
             serverSendMessage(game->connected[i], s_buff, MSG_TEXT);
+        }
+
+        if (roll_result == MAX_DICE_ROLL + 2)
+        {
+            handleEndOfGame(game);
         }
 
         return;
@@ -221,25 +255,6 @@ void *connectionHandlerThread(void *arg)
         printf("Player connected with id %s.\n", message);
         sendMessage(confd, message, MSG_CONN);
         printf("CONN sent.\n");
-    }
-}
-
-void handleEndOfGame(GameState *game)
-{
-    if (game->in_progress == 1)
-    {
-        printf("Ending early.\n");
-    }
-    else
-    {
-        printf("Game won by %d.", game->winner);
-    }
-
-    for (int i = 0; i < game->total_players; i++)
-    {
-        serverSendMessage(game->connected[i], "", MSG_TEXT);
-        serverSendMessage(game->connected[i], "", MSG_END);
-        disconnectPlayer(game, i);
     }
 }
 

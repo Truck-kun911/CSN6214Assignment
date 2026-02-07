@@ -18,6 +18,7 @@ void *receiveThread(void *arguments)
         receiveMessage(args->fd, message, msg_code);
         handler(message, msg_code);
     }
+    free(arguments);
 }
 
 pthread_t createReceiveThread(int fd, handler_fn handler, int *running_flag)

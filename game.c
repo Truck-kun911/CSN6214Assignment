@@ -6,6 +6,18 @@ GameState *initGame()
                            PROT_READ | PROT_WRITE,
                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     resetGame(game);
+    for (int i = 0; i < MAX_PLAYERS; i++)
+    {
+        Player *player = malloc(sizeof(Player));
+        player->id = i;
+        player->confd = -1;
+        player->voted = 0;
+        player->recv_tid = -1;
+        player->wins = 0;
+        game->connected[i] = player;
+        game->position[i] = 0;
+    }
+
     return game;
 }
 
@@ -16,18 +28,9 @@ void resetGame(GameState *game)
     game->total_players = 0;
     game->start_vote = 0;
     game->winner = -1;
+    if (game->scheduler != NULL)
+        free_scheduler(game->scheduler);
     game->scheduler = create_scheduler(MAX_PLAYERS);
-
-    for (int i = 0; i < MAX_PLAYERS; i++)
-    {
-        Player *player = malloc(sizeof(Player));
-        player->id = i;
-        player->confd = -1;
-        player->voted = 0;
-        player->recv_tid = -1;
-        game->connected[i] = player;
-        game->position[i] = 0;
-    }
 
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -40,6 +43,10 @@ void freeGame(GameState *game)
     for (int i = 0; i < MAX_PLAYERS; i++)
     {
         free(game->connected[i]);
+    }
+    if (munmap(game, sizeof(GameState)) == -1)
+    {
+        perror("munmap failed");
     }
 }
 
@@ -115,6 +122,15 @@ int handleStart(GameState *game, int player_id, char *args)
     return 1;
 }
 
+int handleWin(GameState *game, int player_id)
+{
+    lockGame(game);
+    game->in_progress = 0;
+    game->winner = player_id;
+    unlockGame(game);
+    return 1;
+}
+
 int handleRoll(GameState *game, int player_id, char *args)
 {
     int current_player_id;
@@ -127,17 +143,16 @@ int handleRoll(GameState *game, int player_id, char *args)
         return -1;
     }
 
-    int dice = rand() % 6 + 1;
+    int dice = rand() % MAX_DICE_ROLL + 1;
     game->position[player_id] += dice;
-
-    if (game->position[player_id] >= 21) {
-        game->in_progress = 0;
-        game->winner = player_id;
-    }
-
     next(game->scheduler);
-
     unlockGame(game);
+
+    if (game->position[player_id] >= 21)
+    {
+        handleWin(game, player_id);
+        return MAX_DICE_ROLL + 2;
+    }
 
     return dice;
 }
